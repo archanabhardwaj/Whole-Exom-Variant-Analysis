@@ -1,0 +1,86 @@
+#!/usr/bin/env python3
+
+"""
+parse_samples.py
+Part of the WGS/WES Germline + Somatic Variant Analysis Snakemake Pipeline.
+This script validates and parses a samples TSV file for use in the pipeline.
+Expected TSV columns:
+    - sample       : Sample identifier
+    - type         : Sample type (e.g., germline, tumor, normal)
+    - fastq1       : Path to FASTQ read 1
+    - fastq2       : Path to FASTQ read 2
+    - pairing_id   : Optional pairing/group identifier for tumor-normal pairs
+
+Example samples.tsv:
+    NA12878  germline  data/NA12878_R1.fastq.gz  data/NA12878_R2.fastq.gz
+    T1       tumor     samples/T1_T_R1.fastq.gz  samples/T1_T_R2.fastq.gz  pair1
+    N1       normal    samples/T1_N_R1.fastq.gz  samples/T1_N_R2.fastq.gz  pair1
+
+Usage:
+    python parse_samples.py --input samples.tsv
+"""
+
+import sys
+import csv
+
+def parse_samples(samples_tsv):
+    samples = {}
+    tumor_pairs = {}
+    with open(samples_tsv) as f:
+        reader = csv.reader(f, delimiter='\t')
+        for lineno, row in enumerate(reader, start=1):
+            if not row or row[0].startswith('#'):
+                continue
+
+            if len(row) < 4:
+                sys.exit(f"ERROR line {lineno}: not enough columns in {samples_tsv}")
+
+            sample, stype, fastq1, fastq2 = row[:4]
+            pairing = row[4] if len(row) >= 5 else ""
+
+            if stype not in {"germline", "tumor", "normal"}:
+                sys.exit(f"ERROR line {lineno}: invalid type '{stype}' (must be germline/tumor/normal)")
+
+            if sample in samples:
+                sys.exit(f"ERROR line {lineno}: duplicate sample '{sample}'")
+
+            samples[sample] = {
+                "type": stype,
+                "fastq1": fastq1,
+                "fastq2": fastq2,
+                "pairing": pairing
+            }
+
+            if stype in {"tumor", "normal"} and pairing:
+                tumor_pairs.setdefault(pairing, {"tumor": None, "normal": None})
+                tumor_pairs[pairing][stype] = sample
+
+    # Validation: check tumor/normal pairs
+    for pair, d in tumor_pairs.items():
+        if d["tumor"] is None or d["normal"] is None:
+            sys.exit(f"ERROR: Pairing id '{pair}' missing tumor or normal sample")
+
+    return samples, tumor_pairs
+
+
+def main():
+    if len(sys.argv) < 2:
+        sys.exit("Usage: parse_samples.py samples.tsv")
+
+    samples_tsv = sys.argv[1]
+    samples, tumor_pairs = parse_samples(samples_tsv)
+
+    print("# Parsed samples:")
+    for s, meta in samples.items():
+        print(f"{s}\t{meta['type']}\t{meta['fastq1']}\t{meta['fastq2']}\t{meta['pairing']}")
+
+    if tumor_pairs:
+        print("\n# Tumor/Normal pairs:")
+        for pair, d in tumor_pairs.items():
+            print(f"{pair}\tTumor={d['tumor']}\tNormal={d['normal']}")
+
+if __name__ == "__main__":
+    main()
+
+
+

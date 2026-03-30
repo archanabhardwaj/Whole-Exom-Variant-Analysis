@@ -1,0 +1,9 @@
+name: bwa_samtools        # name of the conda environment
+channels:                 # order matters: bioconda → conda-forge → defaults
+  - bioconda
+  - conda-forge
+  - defaults
+dependencies:             # minimal set of required tools
+  - bwa-mem2=2.2.1         # version pinning recommended for reproducibility
+  - samtools=1.17
+  - python=3.10

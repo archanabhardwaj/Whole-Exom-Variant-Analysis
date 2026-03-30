@@ -1,0 +1,204 @@
+import os
+from snakemake.utils import min_version
+min_version("6.0")
+
+configfile: "config.yaml"
+SAMPLES = config["samples"]
+REF = config["reference"]["fasta"]
+THREADS = config.get("threads", 8)
+
+from scripts.parse_samples import parse_samples
+samplesheet, tumor_pairs = parse_samples(config["samples_tsv"])
+
+def sample_fastqs(sample):
+    r1 = samplesheet[sample]["fastq1"]
+    r2 = samplesheet[sample]["fastq2"]
+    return r1, r2
+
+# Load samplesheet (TSV: sample\ttype\tfastq1\tfastq2\tpairing_id(optional for tumor/normal))
+samplesheet = dict()
+with open(config["samples_tsv"]) as fh:
+    for line in fh:
+        if line.strip() == "":
+            continue
+        if line.startswith("#"):
+            continue
+        sample, stype, fastq1, fastq2, *rest = line.strip().split("\t")
+        pairing = rest[0] if len(rest) > 0 else ""
+        samplesheet[sample] = {"type": stype, "fastq1": fastq1, "fastq2": fastq2, "pairing": pairing}
+
+# Make lists
+ALL_SAMPLES = list(samplesheet.keys())
+Germline_samples = [s for s in ALL_SAMPLES if samplesheet[s]["type"] == "germline"]
+Tumor_samples = [s for s in ALL_SAMPLES if samplesheet[s]["type"] == "tumor"]
+Normal_samples = [s for s in ALL_SAMPLES if samplesheet[s]["type"] == "normal"]
+
+# Output directories
+rule all:
+    input:
+        expand("results/germline/{{sample}}.filtered.vcf.gz", sample=Germline_samples),
+        expand("results/somatic/{{pair}}.mutect2.filtered.vcf.gz", pair=set([samplesheet[s]["pairing"] for s in ALL_SAMPLES if samplesheet[s]["pairing"]])),
+        "results/multiqc_report.html"
+
+##################### FASTQC #####################
+
+rule fastqc:
+    input:
+        r1=lambda wildcards: samplesheet[wildcards.sample]["fastq1"],
+        r2=lambda wildcards: samplesheet[wildcards.sample]["fastq2"]
+    output:
+        "qc/fastqc/{sample}_R1_fastqc.zip",
+        "qc/fastqc/{sample}_R2_fastqc.zip"
+    threads: 2
+    conda: "envs/fastqc.yaml"
+    shell: """
+    fastqc -o qc/fastqc -t {threads} {input.r1} {input.r2}
+    """
+
+##################### Align (bwa mem2 preferred for speed) #####################
+rule align:
+    input:
+        r1=lambda w: samplesheet[w.sample]["fastq1"],
+        r2=lambda w: samplesheet[w.sample]["fastq2"],
+        ref=REF
+    output:
+        temp("bam/{sample}.sorted.bam")
+    threads: 8
+    conda: "envs/bwa_samtools.yaml"
+    shell: """
+    bwa-mem2 mem -t {threads} {input.ref} {input.r1} {input.r2} | samtools sort -@ {threads} -o {output}
+    samtools index {output}
+    """
+
+##################### Mark duplicates #####################
+rule markdup:
+    input:
+        bam="bam/{sample}.sorted.bam"
+    output:
+        bam="bam/{sample}.dedup.bam",
+        bai="bam/{sample}.dedup.bam.bai",
+        metrics="qc/picard/{sample}.markdup_metrics.txt"
+    conda: "envs/picard.yaml"
+    shell: """
+    picard MarkDuplicates I={input.bam} O={output.bam} M={output.metrics} CREATE_INDEX=true
+    """
+
+##################### Base recalibration + apply (GATK) #####################
+rule bqsr:
+    input:
+        bam="bam/{sample}.dedup.bam",
+        ref=REF,
+        known_sites=config["reference"]["known_sites"]
+    output:
+        bam="bam/{sample}.recal.bam",
+        bai="bam/{sample}.recal.bam.bai"
+    conda: "envs/gatk.yaml"
+    threads: 4
+    shell: """
+    gatk BaseRecalibrator -I {input.bam} -R {input.ref} --known-sites {input.known_sites} -O bam/{wildcards.sample}.recal.table
+    gatk ApplyBQSR -R {input.ref} -I {input.bam} --bqsr-recal-file bam/{wildcards.sample}.recal.table -O {output.bam}
+    """
+
+##################### Germline: HaplotypeCaller per-sample gVCF #####################
+rule haplotypecaller_gvcf:
+    input:
+        bam="bam/{sample}.recal.bam",
+        ref=REF
+    output:
+        gvcf="germline/{sample}.g.vcf.gz"
+    conda: "envs/gatk.yaml"
+    threads: 4
+    shell: """
+    gatk HaplotypeCaller -R {input.ref} -I {input.bam} -O {output.gvcf} -ERC GVCF
+    """
+
+##################### Joint genotyping (GenomicsDBImport + GenotypeGVCFs) #####################
+rule genomicsdb_import:
+    input:
+        gvcfs=expand("germline/{{s}}.g.vcf.gz", s=Germline_samples),
+        ref=REF
+    output:
+        dbdir="germline/genomicsdb"
+    conda: "envs/gatk.yaml"
+    shell: """
+    mkdir -p {output.dbdir}
+    gatk GenomicsDBImport -V {input.gvcfs} --genomicsdb-workspace-path {output.dbdir} -R {input.ref}
+    """
+
+rule genotype_gvcfs:
+    input:
+        dbdir="germline/genomicsdb",
+        ref=REF
+    output:
+        vcf="results/germline/cohort.raw.vcf.gz"
+    conda: "envs/gatk.yaml"
+    shell: """
+    gatk GenotypeGVCFs -R {input.ref} -V gendb://{input.dbdir} -O {output.vcf}
+    """
+
+# Simple hard filtering (example) -> produces per-sample filtered vcf (customize VQSR if enough samples)
+rule hard_filter_germline:
+    input:
+        vcf="results/germline/cohort.raw.vcf.gz"
+    output:
+        vcf="results/germline/{sample}.filtered.vcf.gz"
+    params:
+        sample="{sample}"
+    conda: "envs/bcftools.yaml"
+    shell: """
+    bcftools view -s {params.sample} {input.vcf} | bcftools filter -e 'QUAL<30 || DP<10' -Oz -o {output.vcf}
+    bcftools index {output.vcf}
+    """
+
+# Somatic: Mutect2 per tumor-normal pair
+rule mutect2:
+    input:
+        tumor_bam="bam/{tumor}.recal.bam",
+        normal_bam="bam/{normal}.recal.bam",
+        ref=REF,
+        pon=config["somatic"]["panel_of_normals"],
+        germline_resource=config["somatic"]["germline_resource"]
+    output:
+        vcf="results/somatic/{pair}.mutect2.vcf.gz"
+    conda: "envs/gatk.yaml"
+    threads: 4
+    shell: """
+    gatk Mutect2 -R {input.ref} -I {input.tumor_bam} -tumor {wildcards.tumor} -I {input.normal_bam} -normal {wildcards.normal} --panel-of-normals {input.pon} --germline-resource {input.germline_resource} -O {output.vcf}
+    """
+
+rule filter_mutect:
+    input:
+        vcf="results/somatic/{pair}.mutect2.vcf.gz",
+        ref=REF
+    output:
+        vcf="results/somatic/{pair}.mutect2.filtered.vcf.gz"
+    conda: "envs/gatk.yaml"
+    shell: """
+    gatk FilterMutectCalls -V {input.vcf} -R {input.ref} -O {output.vcf}
+    bcftools index {output.vcf}
+    """
+
+#####################  Annotation (VEP) #####################
+rule vep_annotate:
+    input:
+        vcf="results/somatic/{pair}.mutect2.filtered.vcf.gz"
+    output:
+        vcf="results/somatic/{pair}.mutect2.filtered.vep.vcf.gz"
+    conda: "envs/vep.yaml"
+    threads: 2
+    shell: """
+    vep -i {input.vcf} --vcf --compress_output bgzip -o {output.vcf} --fork {threads}
+    tabix -p vcf {output.vcf}
+    """
+
+# MultiQC (collect QC)
+rule multiqc:
+    input:
+        expand("qc/fastqc/{sample}_R1_fastqc.zip", sample=ALL_SAMPLES),
+        expand("qc/picard/{sample}.markdup_metrics.txt", sample=ALL_SAMPLES)
+    output:
+        "results/multiqc_report.html"
+    conda: "envs/multiqc.yaml"
+    shell: """
+    multiqc -o results .
+    """

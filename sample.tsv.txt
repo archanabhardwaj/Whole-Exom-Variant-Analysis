@@ -1,0 +1,5 @@
+## File: `samples.tsv` (example)
+NA12878	germline	data/NA12878_R1.fastq.gz	data/NA12878_R2.fastq.gz	
+T1	tumor	samples/T1_T_R1.fastq.gz	samples/T1_T_R2.fastq.gz	pair1
+N1	normal	samples/T1_N_R1.fastq.gz	samples/T1_N_R2.fastq.gz	pair1
+

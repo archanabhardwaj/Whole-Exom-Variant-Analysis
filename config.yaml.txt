@@ -1,0 +1,15 @@
+## File: `config.yaml`
+
+samples_tsv: samples.tsv
+threads: 12
+reference:
+  fasta: /path/to/hg38.fa
+  known_sites: /path/to/dbsnp.vcf.gz
+
+somatic:
+  panel_of_normals: /path/to/pon.vcf.gz
+  germline_resource: /path/to/gnomad.vcf.gz
+
+# tool-specific params (tune for WES vs WGS)
+exome_intervals: /path/to/targets.interval_list  # optional for WES
+

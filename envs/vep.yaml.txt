@@ -1,0 +1,11 @@
+name: vep
+channels:
+  - bioconda
+  - conda-forge
+dependencies:
+  - ensembl-vep
+  - samtools
+  - perl
+  - perl-dbi
+  - perl-dbd-mysql
+  - python=3.10
