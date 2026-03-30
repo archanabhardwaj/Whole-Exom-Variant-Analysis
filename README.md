@@ -1,3 +1,11 @@
+
+<img width="1426" height="971" alt="image" src="https://github.com/user-attachments/assets/2dde3dec-99c3-43bd-a57b-1f549b1225a3" />
+
+
+
+
+
+
 # Whole-Exom-Variant-Analysis
 ---
 
